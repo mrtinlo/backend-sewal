@@ -48,11 +48,13 @@ class BookingController extends Controller
                 'is_membership' => 0,
                 'total_discount' => $request->discount > 0 ? $request->discount : 0,
                 'booking_id' => $booking_id,
-                'status' => 'Lunas',
-                'is_paid' => true,
+                'status' => 'Menunggu Pembayaran',
+                'is_paid' => false,
             ]);
 
             $booking_detail_list = [];
+            $index=1;
+            $item_details = [];
             foreach ($cart[0]['detail'] as $each_cart) {
                 $check_booking_detail = BookingDetail::where('court_id', $each_cart['court_id'])->where('start_time', Carbon::parse($each_cart['start_time'])->format('H:i'))->where('date', Carbon::parse($cart[0]['date'])->format('Y-m-d'))->first();
 
@@ -71,49 +73,85 @@ class BookingController extends Controller
                     'is_membership' => 0
                 ]);
 
-                $temp = $booking_detail;
-                $temp['court_name'] = $each_cart['court_name'];
+                $item_details [] = [
+                    'id' => $index++,
+                    'price' => $each_cart['price'] - ($each_cart['discount'] ? $each_cart['discount'] : 0),
+                    'quantity' => 1,
+                    'name' => $each_cart['court_name'].' ('.$booking_detail->start_time.'-'.$booking_detail->end_time.') - '.$booking_detail->date
+                ];
 
-                array_push($booking_detail_list, $temp);
+
             }
 
 
-            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+            \Midtrans\Config::$serverKey = config('midtrans.serverKey');
+            \Midtrans\Config::$isProduction = false;
+            \Midtrans\Config::$isSanitized = true;
+            \Midtrans\Config::$is3ds = true;
 
-            if ($request->payment_type == 'full-payment') {
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->total_price - $request->discount,
-                    'type' => 'schedule',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
+            $params = array(
+                'transaction_details' => array(
+                    'order_id' => $booking_id.'/schedule',
+                    'gross_amount' => $request->total_price - ($request->discount > 0 ? $request->discount : 0)
+                ),
+                'customer_details' => array(
+                    'first_name' => $user->name
+                ),
+                'item_details' => $item_details
+            );
 
-                foreach ($booking_detail_list as $detail) {
-                    $payment_detail = PaymentDetail::Create([
-                        'payment_id' => $payment->id,
-                        'booking_detail_id' => $detail->id,
-                        'amount' => $detail->price - $detail->discount,
-                    ]);
-                }
+            $paymentUrl = null;
 
-            } else if ($request->payment_type == 'down-payment') {
+            try {
+                // Get Snap Payment Page URL
+                $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
 
-                if ($request->down_payment_amount <= 0) {
-                    return ResponseFormatter::error(null, 'Jumlah DP harus lebih besar dari 0');
-                }
-
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->down_payment_amount,
-                    'type' => 'down-payment',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
             }
+            catch (Exception $e) {
+                DB::rollBack();
+                $paymentUrl = 'Pembayaran Gagal';
+                return ResponseFormatter::error('test',$e);
+            }
+
+
+//            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+//
+//            if ($request->payment_type == 'full-payment') {
+//                $payment = Payment::Create([
+//                    'booking_id' => $booking->id,
+//                    'amount' => $request->total_price - $request->discount,
+//                    'type' => 'schedule',
+//                    'payment_method' => $request->payment_method,
+//                    'payment_id' => $payment_id
+//                ]);
+//
+//                foreach ($booking_detail_list as $detail) {
+//                    $payment_detail = PaymentDetail::Create([
+//                        'payment_id' => $payment->id,
+//                        'booking_detail_id' => $detail->id,
+//                        'amount' => $detail->price - $detail->discount,
+//                    ]);
+//                }
+//
+//            } else if ($request->payment_type == 'down-payment') {
+//
+//                if ($request->down_payment_amount <= 0) {
+//                    return ResponseFormatter::error(null, 'Jumlah DP harus lebih besar dari 0');
+//                }
+//
+//                $payment = Payment::Create([
+//                    'booking_id' => $booking->id,
+//                    'amount' => $request->down_payment_amount,
+//                    'type' => 'down-payment',
+//                    'payment_method' => $request->payment_method,
+//                    'payment_id' => $payment_id
+//                ]);
+//            }
 
             DB::commit();
-            return ResponseFormatter::success(null, 'Berhasil Membuat Booking Baru');
+            return ResponseFormatter::success([
+                'payment_link' => $paymentUrl
+            ], 'Berhasil Membuat Booking Baru');
 
         } catch (Exception $e) {
             DB::rollBack();
@@ -169,14 +207,14 @@ class BookingController extends Controller
     }
 
     public function booking_history(Request $request){
+        $current = null;
         try{
-            $booking = Booking::where('user_id',Auth::user()->id)->orderBy('created_at','desc')->get();
+            $booking = Booking::where('user_id',Auth::user()->id)->orderBy('created_at','desc')->limit(10)->get();
 
             $booking_list =[];
 
-
             foreach($booking as $each_booking){
-
+                $current++;
                 $booking_detail = BookingDetail::where('booking_id',$each_booking->id)->orderBy('date','asc')->orderBy('court_id','asc')->orderBy('is_membership','asc')->orderBy('start_time','asc')->get();
                 $current_date = Carbon::parse($each_booking->date)->format('Y-m-d');
 
@@ -235,28 +273,28 @@ class BookingController extends Controller
 
                             $data = [
                                 'court_id' => $booking_detail[$detail_index]->court_id,
-							    'court_name' => $booking_detail[$detail_index]->court->name,
-							    'time' => $time_array,
-							    'price' => $price_each_court
-						    ];
+                                'court_name' => $booking_detail[$detail_index]->court->name,
+                                'time' => $time_array,
+                                'price' => $price_each_court
+                            ];
 
-						    $price_each_court = 0;
-					    	$time_array =null;
+                            $price_each_court = 0;
+                            $time_array =null;
 
-    						$list_detail[] = $data;
+                            $list_detail[] = $data;
 
-	    					$data = [
+                            $data = [
                                 'date' => Carbon::parse($booking_detail[$detail_index]->date)->format('Y-m-d'),
-							    'list' => $list_detail
-						    ];
+                                'list' => $list_detail
+                            ];
 
                             $list_detail = [];
 
-		    				$detail_temp[] = $data;
+                            $detail_temp[] = $data;
 
-			    			$temp_start_time = Carbon::parse($detail->start_time)->format('H:i');
-				    		$temp_end_time = Carbon::parse($detail->end_time)->format('H:i');
-				    	}
+                            $temp_start_time = Carbon::parse($detail->start_time)->format('H:i');
+                            $temp_end_time = Carbon::parse($detail->end_time)->format('H:i');
+                        }
                         $current_court_id = $detail->court_id;
                         $price_each_court += $detail->price - $detail->discount;
                         $detail_index++;
@@ -285,29 +323,31 @@ class BookingController extends Controller
                                 }
                             }
                         }else{
-                            array_push($time_array, $temp_start_time . '-' . $temp_end_time);
+                            $time_array[] = $temp_start_time . '-' . $temp_end_time;
                             $data = [
                                 'court_id' => $booking_detail[$detail_index]->court_id,
-							    'court_name' => $booking_detail[$detail_index]->court->name,
-							    'time' => $time_array,
-							    'price' => $price_each_court
-						    ];
+                                'court_name' => $booking_detail[$detail_index]->court->name,
+                                'time' => $time_array,
+                                'price' => $price_each_court
+                            ];
 
 
-    						$price_each_court = 0;
-	    					$time_array =null;
+                            $price_each_court = 0;
+                            $time_array =null;
 
-		    				array_push($list_detail,$data);
+                            array_push($list_detail,$data);
 
-	    					$temp_start_time = Carbon::parse($detail->start_time)->format('H:i');
-		    				$temp_end_time = Carbon::parse($detail->end_time)->format('H:i');
-			    		}
+                            $temp_start_time = Carbon::parse($detail->start_time)->format('H:i');
+                            $temp_end_time = Carbon::parse($detail->end_time)->format('H:i');
+                        }
                         $current_court_id = $detail->court_id;
                         $price_each_court += $detail->price - $detail->discount;
                         $detail_index++;
                     }
 
                 }
+
+
                 $time_array[] = $temp_start_time . '-' . $temp_end_time;
                 $data = [
                     'court_id' => $booking_detail[$detail_index]->court_id,
@@ -315,6 +355,7 @@ class BookingController extends Controller
                     'time' => $time_array,
                     'price' => $price_each_court
                 ];
+
                 $price_each_court = 0;
                 $time_array =null;
                 $list_detail[] = $data;
@@ -341,12 +382,12 @@ class BookingController extends Controller
                 $booking_list[] = $booking_data;
             }
 
-		    return ResponseFormatter::success($booking_list,'Berhasil Mendapatkan Data Booking');
+            return ResponseFormatter::success($booking_list,'Berhasil Mendapatkan Data Booking');
 
 
-	    }catch(Exception $e){
+        }catch(Exception $e){
             return ResponseFormatter::error(
-                ['error' => $e->getMessage()],
+                ['error' => $e->getMessage(),'current' => $current],
                 'General Error',
                 500
             );

@@ -292,6 +292,7 @@ class KeepController extends Controller
                 'is_membership' => 0,
                 'total_discount' => $request->discount ? $request->discount : 0,
                 'is_paid' => false,
+                'status' => 'Menunggu Pembayaran',
                 'booking_id' => $booking_id
             ]);
 
@@ -307,7 +308,8 @@ class KeepController extends Controller
             }
 
             $booking_detail_list = [];
-
+            $item_details = [];
+            $index=0;
             foreach($keep_detail as $detail){
 
                 $check_booking_detail = BookingDetail::where('court_id',$detail['court_id'])->where('start_time',Carbon::parse($detail['start_time'])->format('H:i'))->where('date',Carbon::parse($detail['date'])->format('Y-m-d'))->first();
@@ -329,6 +331,15 @@ class KeepController extends Controller
                     'is_membership' => 0
                 ]);
 
+                if($request->payment_type == 'full-payment'){
+                    $item_details [] = [
+                        'id' => $index++,
+                        'price' => $booking_detail->price - $booking_detail->discount,
+                        'quantity' => 1,
+                        'name' => $booking_detail->court->name.' ('.$booking_detail->start_time.'-'.$booking_detail->end_time.') - '.$booking_detail->date
+                    ];
+                }
+
                 array_push($booking_detail_list,$booking_detail);
 
                 $detail->delete();
@@ -336,51 +347,108 @@ class KeepController extends Controller
 
             $keep->delete();
 
-            $payment_id = 'Payment-'.Carbon::now()->format('YmdHis');
+            $paymentUrl = null;
 
-            if($request->payment_type == 'full-payment'){
+            if($request->payment_method != 'qris'){
+                $payment_id = 'Payment-'.Carbon::now()->format('YmdHis');
 
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->total_price - $request->discount,
-                    'type' => 'schedule',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
+                if($request->payment_type == 'full-payment'){
 
-                foreach($booking_detail_list as $detail){
-                    $payment_detail = PaymentDetail::Create([
-                        'payment_id' => $payment->id,
-                        'booking_detail_id' => $detail->id,
-                        'amount' => $detail->price - $detail->discount,
+                    $payment = Payment::Create([
+                        'booking_id' => $booking->id,
+                        'amount' => $request->total_price - $request->discount,
+                        'type' => 'schedule',
+                        'payment_method' => $request->payment_method,
+                        'payment_id' => $payment_id
                     ]);
 
-                    $booking_detail_to_is_paid = BookingDetail::find($detail->id);
-                    $booking_detail_to_is_paid->is_paid = true;
-                    $booking_detail_to_is_paid->save();
+                    foreach($booking_detail_list as $detail){
+                        $payment_detail = PaymentDetail::Create([
+                            'payment_id' => $payment->id,
+                            'booking_detail_id' => $detail->id,
+                            'amount' => $detail->price - $detail->discount,
+                        ]);
+
+                        $booking_detail_to_is_paid = BookingDetail::find($detail->id);
+                        $booking_detail_to_is_paid->is_paid = true;
+                        $booking_detail_to_is_paid->save();
+                    }
+
+                    $booking->is_paid = true;
+                    $booking->save();
+
+                }else if($request->payment_type == 'down-payment'){
+
+                    if($request->down_payment_amount <= 0){
+                        return ResponseFormatter::error(null,'Jumlah DP harus lebih besar dari 0');
+                    }
+
+                    $payment = Payment::Create([
+                        'booking_id' => $booking->id,
+                        'amount' => $request->down_payment_amount,
+                        'type' => 'down-payment',
+                        'payment_method' => $request->payment_method,
+                        'payment_id' => $payment_id
+                    ]);
+                }
+            }else if($request->payment_type != 'no-payment'){
+                \Midtrans\Config::$serverKey = config('midtrans.serverKey');
+                \Midtrans\Config::$isProduction = false;
+                \Midtrans\Config::$isSanitized = true;
+                \Midtrans\Config::$is3ds = true;
+
+                if($request->payment_type == 'full-payment'){
+                    $order_id = $booking_id.'/schedule';
+                    $gross_amount = $booking->total_payment - $booking->total_discount;
+
+                    $params = array(
+                        'transaction_details' => array(
+                            'order_id' => $order_id,
+                            'gross_amount' => $gross_amount
+                        ),
+                        'customer_details' => array(
+                            'first_name' => $user->name
+                        ),
+                        'item_details' => $item_details
+                    );
+                }else{
+                    $order_id = $booking_id.'/down-payment';
+                    $gross_amount = $request->down_payment_amount;
+
+                    $params = array(
+                        'transaction_details' => array(
+                            'order_id' => $order_id,
+                            'gross_amount' => $gross_amount
+                        ),
+                        'customer_details' => array(
+                            'first_name' => $user->name
+                        )
+                    );
                 }
 
-                $booking->is_paid = true;
-                $booking->save();
 
-            }else if($request->payment_type == 'down-payment'){
+                $paymentUrl = null;
 
-                if($request->down_payment_amount <= 0){
-                    return ResponseFormatter::error(null,'Jumlah DP harus lebih besar dari 0');
+                try {
+                    // Get Snap Payment Page URL
+                    $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
+
                 }
-
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->down_payment_amount,
-                    'type' => 'down-payment',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
+                catch (Exception $e) {
+                    DB::rollBack();
+                    return ResponseFormatter::error(
+                        ['error' => $e->getMessage()],
+                        'General Error',
+                        500
+                    );
+                }
             }
 
             DB::commit();
 
-            return ResponseFormatter::success(null, 'Berhasil Mengubah Keep Menjadi Booking');
+            return ResponseFormatter::success([
+                'payment_link' => $paymentUrl
+            ], 'Berhasil Mengubah Keep Menjadi Booking');
 
         }catch (Exception $e){
             DB::rollBack();

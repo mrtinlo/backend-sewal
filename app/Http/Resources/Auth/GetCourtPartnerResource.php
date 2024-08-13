@@ -23,11 +23,14 @@ class GetCourtPartnerResource extends JsonResource
         $profile = null;
 
         if($court_partner->profile){
-            $image_path = public_path('storage/'.$court_partner->profile);
-            $image_extension = explode('.',$court_partner->profile)[1];
-            $image = file_get_contents($image_path);
-            $base64_image = base64_encode($image);
-            $profile = 'data:image/'.$image_extension.';base64,'.$base64_image;
+            try{
+                $image_path = public_path('storage/'.$court_partner->profile);
+                $image_extension = explode('.',$court_partner->profile)[1];
+                $image = file_get_contents($image_path);
+                $base64_image = base64_encode($image);
+                $profile = 'data:image/'.$image_extension.';base64,'.$base64_image;
+            }catch(\Exception $e){}
+
         }
 
         $facility_list = [];
@@ -35,11 +38,14 @@ class GetCourtPartnerResource extends JsonResource
             $base64_string = null;
 
             if($facility->icon){
-                $image_path = public_path('storage/'.$facility->icon);
-                $image_extension = explode('.',$facility->icon)[1];
-                $image = file_get_contents($image_path);
-                $base64_image = base64_encode($image);
-                $base64_string = 'data:image/'.$image_extension.';base64,'.$base64_image;
+                try{
+                    $image_path = public_path('storage/'.$facility->icon);
+                    $image_extension = explode('.',$facility->icon)[1];
+                    $image = file_get_contents($image_path);
+                    $base64_image = base64_encode($image);
+                    $base64_string = 'data:image/'.$image_extension.';base64,'.$base64_image;
+                }catch(\Exception $e){}
+
             }
 
             $facility_list[] = [

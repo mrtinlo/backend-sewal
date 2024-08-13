@@ -93,7 +93,7 @@ class CourtListResource extends JsonResource
 
                         $slots[] = [
                             'hour' => intval($hour),
-                            'is_disabled' => $is_disabled,
+                            'is_disabled' => true,
                             'price' => intval($schedule[$schedule_index]->price),
                             'time' => Carbon::parse($price_list[$i]->start_time)->format('H:i') . "-" . Carbon::parse($price_list[$i]->end_time)->format('H:i'),
                         ];
@@ -109,7 +109,7 @@ class CourtListResource extends JsonResource
 
                         $slots[] = [
                             'hour' => intval($hour),
-                            'is_disabled' => $is_disabled,
+                            'is_disabled' => true,
                             'price' => intval($price_list[$i]->price),
                             'time' => Carbon::parse($price_list[$i]->start_time)->format('H:i') . "-" . Carbon::parse($price_list[$i]->end_time)->format('H:i'),
                         ];

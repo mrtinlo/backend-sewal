@@ -56,7 +56,7 @@ class TransactionController extends Controller
 
                 $total_payment = intval($total_payment[0]->amount);
 
-                $total_unpaid_booking = Booking::join('booking_details','payment_details.booking_detail_id','=','booking_details.id')
+                $total_unpaid_booking = Booking::join('booking_details','bookings.id','=','booking_details.booking_id')
                     ->where('booking_details.court_id',$court_id)
                     ->where('bookings.is_membership',0)
                     ->whereRaw('bookings.date <= ? and bookings.date >= ?',[$date_end,$date_start])
@@ -72,7 +72,10 @@ class TransactionController extends Controller
                         }else if($booking->payment_type == 'down-payment'){
                             $payment = Payment::where('type','down-payment')->where('booking_id',$booking->id)->first();
 
-                            $total_unpayment += $booking->total_payment - $booking->total_discount - $payment->amount;
+                            if($payment !== null){
+                                $total_unpayment += $booking->total_payment - $booking->total_discount - $payment->amount;
+                            }
+
                         }
 
                         $current_booking_id = $total_unpaid_booking[0]->id;

@@ -33,6 +33,8 @@ use App\Http\Controllers\User\BookingController as UserBookingController;
 Route::post('login',[AuthController::class,'login']);
 Route::post("register/user",[AuthController::class,'register_user']);
 
+Route::post('callback',[\App\Http\Controllers\MidtransController::class,'callback']);
+
 Route::middleware('auth:sanctum')->group(function(){
     Route::get('user',[AuthController::class,'get_user']);
     Route::post('logout',[AuthController::class,'logout']);
@@ -132,7 +134,5 @@ Route::middleware('auth:sanctum')->group(function(){
     Route::post('city',[CityController::class,'add'])->middleware(['role:Admin']);
     Route::post('city-edit',[CityController::class,'edit'])->middleware(['role:Admin']);
     Route::delete('city/{id}',[CityController::class,'delete'])->middleware(['role:Admin']);
-
-    Route::post('callback',[\App\Http\Controllers\IpaymuController::class,'callback']);
 
 });

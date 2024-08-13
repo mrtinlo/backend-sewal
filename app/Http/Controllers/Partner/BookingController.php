@@ -275,6 +275,8 @@ class BookingController extends Controller
                         'user_id' => $user->id
                     ]);
                 }
+
+                $user->name = $request->name;
             }
 
             $booking_id = 'Booking-' . Carbon::now()->format('YmdHis');
@@ -288,9 +290,13 @@ class BookingController extends Controller
                 'is_membership' => 0,
                 'total_discount' => $request->discount,
                 'booking_id' => $booking_id,
+                'is_paid' => false,
+                'status' => 'Menunggu Pembayaran'
             ]);
 
             $booking_detail_list = [];
+            $item_details = [];
+            $index=0;
             foreach ($cart[0]['detail'] as $each_cart) {
                 $check_booking_detail = BookingDetail::where('court_id', $each_cart['court_id'])->where('start_time', Carbon::parse($each_cart['start_time'])->format('H:i'))->where('date', Carbon::parse($cart[0]['date'])->format('Y-m-d'))->first();
 
@@ -309,58 +315,122 @@ class BookingController extends Controller
                     'is_membership' => 0
                 ]);
 
+                if($request->payment_type == 'full-payment'){
+                    $item_details [] = [
+                        'id' => $index++,
+                        'price' => $each_cart['price'] - ($each_cart['discount'] ? $each_cart['discount'] : 0),
+                        'quantity' => 1,
+                        'name' => $each_cart['court_name'].' ('.$booking_detail->start_time.'-'.$booking_detail->end_time.') - '.$booking_detail->date
+                    ];
+                }
+
                 array_push($booking_detail_list, $booking_detail);
             }
 
-            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+            $paymentUrl = null;
 
-            if ($request->payment_type == 'full-payment') {
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->total_price - $request->discount,
-                    'type' => 'schedule',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
+            if($request->payment_method != 'qris'){
+                $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
 
-                foreach ($booking_detail_list as $detail) {
-                    $payment_detail = PaymentDetail::Create([
-                        'payment_id' => $payment->id,
-                        'booking_detail_id' => $detail->id,
-                        'amount' => $detail->price - $detail->discount,
+                if ($request->payment_type == 'full-payment') {
+                    $payment = Payment::Create([
+                        'booking_id' => $booking->id,
+                        'amount' => $request->total_price - $request->discount,
+                        'type' => 'schedule',
+                        'payment_method' => $request->payment_method,
+                        'payment_id' => $payment_id
                     ]);
 
-                    $booking_detail_to_is_paid = BookingDetail::find($detail->id);
-                    $booking_detail_to_is_paid->is_paid = true;
-                    $booking_detail_to_is_paid->save();
+                    foreach ($booking_detail_list as $detail) {
+                        $payment_detail = PaymentDetail::Create([
+                            'payment_id' => $payment->id,
+                            'booking_detail_id' => $detail->id,
+                            'amount' => $detail->price - $detail->discount,
+                        ]);
+
+                        $booking_detail_to_is_paid = BookingDetail::find($detail->id);
+                        $booking_detail_to_is_paid->is_paid = true;
+                        $booking_detail_to_is_paid->save();
+                    }
+
+                    $booking->is_paid = true;
+                    $booking->status = 'Lunas';
+                    $booking->save();
+
+                } else if ($request->payment_type == 'down-payment') {
+
+                    if ($request->down_payment_amount <= 0) {
+                        return ResponseFormatter::error(null, 'Jumlah DP harus lebih besar dari 0');
+                    }
+
+                    $payment = Payment::Create([
+                        'booking_id' => $booking->id,
+                        'amount' => $request->down_payment_amount,
+                        'type' => 'down-payment',
+                        'payment_method' => $request->payment_method,
+                        'payment_id' => $payment_id
+                    ]);
+
+                    $booking->status = 'DP Lunas';
+                    $booking->save();
+
+                }
+            }else if($request->payment_type != 'no-payment'){
+                \Midtrans\Config::$serverKey = config('midtrans.serverKey');
+                \Midtrans\Config::$isProduction = false;
+                \Midtrans\Config::$isSanitized = true;
+                \Midtrans\Config::$is3ds = true;
+
+                if($request->payment_type == 'full-payment'){
+                    $order_id = $booking_id.'/schedule';
+                    $gross_amount = $booking->total_payment - $booking->total_discount;
+
+                    $params = array(
+                        'transaction_details' => array(
+                            'order_id' => $order_id,
+                            'gross_amount' => $gross_amount
+                        ),
+                        'customer_details' => array(
+                            'first_name' => $user->name
+                        ),
+                        'item_details' => $item_details
+                    );
+                }else{
+                    $order_id = $booking_id.'/down-payment';
+                    $gross_amount = $request->down_payment_amount;
+
+                    $params = array(
+                        'transaction_details' => array(
+                            'order_id' => $order_id,
+                            'gross_amount' => $gross_amount
+                        ),
+                        'customer_details' => array(
+                            'first_name' => $user->name
+                        )
+                    );
                 }
 
-                $booking->is_paid = true;
-                $booking->status = 'Lunas';
-                $booking->save();
 
-            } else if ($request->payment_type == 'down-payment') {
+                $paymentUrl = null;
 
-                if ($request->down_payment_amount <= 0) {
-                    return ResponseFormatter::error(null, 'Jumlah DP harus lebih besar dari 0');
+                try {
+                    // Get Snap Payment Page URL
+                    $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
+
                 }
-
-                $payment = Payment::Create([
-                    'booking_id' => $booking->id,
-                    'amount' => $request->down_payment_amount,
-                    'type' => 'down-payment',
-                    'payment_method' => $request->payment_method,
-                    'payment_id' => $payment_id
-                ]);
-
-                $booking->status = 'DP Lunas';
-                $booking->save();
-
+                catch (Exception $e) {
+                    DB::rollBack();
+                    return ResponseFormatter::error([
+                        'error' => $e->getMessage()
+                    ], 'General Error', 500);
+                }
             }
 
             DB::commit();
 
-            return ResponseFormatter::success(null, 'Berhasil Membuat Booking Baru');
+            return ResponseFormatter::success([
+                'payment_link' => $paymentUrl
+            ], 'Berhasil Membuat Booking Baru');
 
         } catch (Exception $e) {
             DB::rollBack();
@@ -680,6 +750,8 @@ class BookingController extends Controller
                         'name' => $request->name,
                         'user_id' => $user->id
                     ]);
+
+                    $user->name = $request->name;
                 }
             }
 
@@ -694,12 +766,13 @@ class BookingController extends Controller
                 'is_membership' => 0,
                 'total_discount' => $request->discount,
                 'booking_id' => $booking_id,
-                'is_paid' => true,
-                'status' => 'Lunas'
+                'is_paid' => false,
+                'status' => 'Menunggu Pembayaran'
             ]);
 
             $booking_detail_list = [];
-
+            $index=1;
+//            $item_details = [];
             foreach($cart as $cart_temp){
                 foreach ($cart_temp['detail'] as $each_cart) {
                     $check_booking_detail = BookingDetail::where('court_id', $each_cart['court_id'])->where('start_time', Carbon::parse($each_cart['start_time'])->format('H:i'))->where('date', Carbon::parse($cart_temp['date'])->format('Y-m-d'))->first();
@@ -719,35 +792,74 @@ class BookingController extends Controller
                         'is_membership' => 0
                     ]);
 
-                    array_push($booking_detail_list, $booking_detail);
+                    $item_details [] = [
+                        'id' => $index++,
+                        'price' => $each_cart['price'] - ($each_cart['discount'] ? $each_cart['discount'] : 0),
+                        'quantity' => 1,
+                        'name' => $each_cart['court_name'].' ('.$booking_detail->start_time.'-'.$booking_detail->end_time.') - '.$booking_detail->date
+                    ];
+
+//                    array_push($booking_detail_list, $booking_detail);
                 }
             }
 
-            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+            \Midtrans\Config::$serverKey = config('midtrans.serverKey');
+            \Midtrans\Config::$isProduction = false;
+            \Midtrans\Config::$isSanitized = true;
+            \Midtrans\Config::$is3ds = true;
 
-            $payment = Payment::Create([
-                'booking_id' => $booking->id,
-                'amount' => $request->total_price - $request->discount,
-                'type' => 'schedule',
-                'payment_method' => $request->payment_method,
-                'payment_id' => $payment_id
-            ]);
+            $params = array(
+                'transaction_details' => array(
+                    'order_id' => $booking_id.'/schedule',
+                    'gross_amount' => $request->total_price - ($request->discount > 0 ? $request->discount : 0)
+                ),
+                'customer_details' => array(
+                    'first_name' => $user->name
+                ),
+                'item_details' => $item_details
+            );
 
-            foreach ($booking_detail_list as $detail) {
-                $payment_detail = PaymentDetail::Create([
-                    'payment_id' => $payment->id,
-                    'booking_detail_id' => $detail->id,
-                    'amount' => $detail->price - $detail->discount,
-                ]);
+            $paymentUrl = null;
 
-                $booking_detail_to_is_paid = BookingDetail::find($detail->id);
-                $booking_detail_to_is_paid->is_paid = true;
-                $booking_detail_to_is_paid->save();
+            try {
+                // Get Snap Payment Page URL
+                $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
+
             }
+            catch (Exception $e) {
+                DB::rollBack();
+                return ResponseFormatter::error([
+                    'error' => $e->getMessage()
+                ], 'General Error', 500);
+            }
+
+//            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+//
+//            $payment = Payment::Create([
+//                'booking_id' => $booking->id,
+//                'amount' => $request->total_price - $request->discount,
+//                'type' => 'schedule',
+//                'payment_method' => $request->payment_method,
+//                'payment_id' => $payment_id
+//            ]);
+//
+//            foreach ($booking_detail_list as $detail) {
+//                $payment_detail = PaymentDetail::Create([
+//                    'payment_id' => $payment->id,
+//                    'booking_detail_id' => $detail->id,
+//                    'amount' => $detail->price - $detail->discount,
+//                ]);
+//
+//                $booking_detail_to_is_paid = BookingDetail::find($detail->id);
+//                $booking_detail_to_is_paid->is_paid = true;
+//                $booking_detail_to_is_paid->save();
+//            }
 
             DB::commit();
 
-            return ResponseFormatter::success(null, 'Berhasil Membuat Booking Baru');
+            return ResponseFormatter::success([
+                'payment_link' => $paymentUrl
+            ], 'Berhasil Membuat Booking Baru');
 
         }catch (Exception $e) {
             DB::rollBack();
@@ -762,6 +874,9 @@ class BookingController extends Controller
         try {
 
             DB::beginTransaction();
+
+
+            $response_message = 'Booking telah dilunasi';
 
             $booking = Booking::find($request->booking_id);
 
@@ -786,33 +901,70 @@ class BookingController extends Controller
                 return ResponseFormatter::error(null, 'Booking telah lunas');
             }
 
-            $booking_detail_list = BookingDetail::where('booking_id', $booking->id)->get();
-            $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
-            $payment = Payment::create([
-                'booking_id' => $booking->id,
-                'amount' => $remain_amount,
-                'type' => 'schedule',
-                'payment_method' => $request->payment_method,
-                'payment_id' => $payment_id
-            ]);
+            $paymentUrl = null;
 
-            foreach ($booking_detail_list as $detail) {
-                $payment_detail = PaymentDetail::create([
-                    'payment_id' => $payment->id,
-                    'booking_detail_id' => $detail->id,
-                    'amount' => $detail->price - $detail->discount,
+            if($request->payment_method != 'qris'){
+                $booking_detail_list = BookingDetail::where('booking_id', $booking->id)->get();
+                $payment_id = 'Payment-' . Carbon::now()->format('YmdHis');
+                $payment = Payment::create([
+                    'booking_id' => $booking->id,
+                    'amount' => $remain_amount,
+                    'type' => 'schedule',
+                    'payment_method' => $request->payment_method,
+                    'payment_id' => $payment_id
                 ]);
 
-                $detail->is_paid = true;
-                $detail->save();
+                foreach ($booking_detail_list as $detail) {
+                    $payment_detail = PaymentDetail::create([
+                        'payment_id' => $payment->id,
+                        'booking_detail_id' => $detail->id,
+                        'amount' => $detail->price - $detail->discount,
+                    ]);
+
+                    $detail->is_paid = true;
+                    $detail->save();
+                }
+                $booking->is_paid = true;
+                $booking->status = 'Lunas';
+                $booking->save();
+            }else{
+                \Midtrans\Config::$serverKey = config('midtrans.serverKey');
+                \Midtrans\Config::$isProduction = false;
+                \Midtrans\Config::$isSanitized = true;
+                \Midtrans\Config::$is3ds = true;
+
+                $order_id = $booking->booking_id.'/schedule';
+
+                $params = array(
+                    'transaction_details' => array(
+                        'order_id' => $order_id,
+                        'gross_amount' => $remain_amount
+                    ),
+                    'customer_details' => array(
+                        'first_name' => $booking->user->name
+                    ),
+                );
+
+                try {
+                    // Get Snap Payment Page URL
+                    $paymentUrl = \Midtrans\Snap::createTransaction($params)->redirect_url;
+                    $response_message = 'Segera Lunasi Pembayaran';
+                }
+                catch (Exception $e) {
+                    DB::rollBack();
+                    return ResponseFormatter::error([
+                        'error' => $e->getMessage()
+                    ], 'General Error', 500);
+                }
             }
-            $booking->is_paid = true;
-            $booking->status = 'Lunas';
-            $booking->save();
+
+
 
             DB::commit();
 
-            return ResponseFormatter::success(null, 'Booking telah dilunasi');
+            return ResponseFormatter::success([
+                'payment_link' => $paymentUrl
+            ], $response_message);
 
         } catch (Exception $e) {
             DB::rollBack();
